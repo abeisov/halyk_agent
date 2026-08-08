@@ -21,9 +21,27 @@ SPECS_JSON = Path("data/processed/specs.json")
 TWO = Decimal("0.01")
 
 
-def _sum_usd(df: pd.DataFrame, txn_ids: list[str]) -> Decimal:
+def _apply_amendments(df: pd.DataFrame, spec: dict) -> pd.DataFrame:
+    """Суммы, раскрытые в документах вместо пустых/неверных строк реестра."""
+    amendments = spec.get("ledger_amendments") or []
+    if not amendments:
+        return df
+    df = df.copy()
+    for a in amendments:
+        df.loc[df["txn_id"] == a["txn_id"], "amount_usd"] = Decimal(str(a["amount_usd"]))
+    return df
+
+
+def _signed_sum(df: pd.DataFrame, txn_ids: list[str]) -> Decimal:
     sel = df[df["txn_id"].isin(txn_ids)]
-    return abs(sum(sel["amount_usd"], Decimal(0)))
+    return sum(sel["amount_usd"], Decimal(0))
+
+
+def _sum_usd(df: pd.DataFrame, txn_ids: list[str], extra: list | None = None) -> Decimal:
+    total = _signed_sum(df, txn_ids)
+    for x in (extra or []):  # внекнижные суммы из документов
+        total += Decimal(str(x))
+    return abs(total)
 
 
 def _breached(actual: Decimal, threshold: Decimal, direction: str) -> bool:
@@ -39,7 +57,8 @@ def _verdict(actual: Decimal, spec: dict) -> str:
 
 
 def _compute_actual(df: pd.DataFrame, spec: dict) -> Decimal:
-    num = _sum_usd(df, spec["relevant_txn_ids"])
+    df = _apply_amendments(df, spec)
+    num = _sum_usd(df, spec["relevant_txn_ids"], spec.get("off_ledger_amounts_usd"))
     if spec["is_ratio"]:
         den = _sum_usd(df, spec["denominator_txn_ids"])
         if den == 0:
@@ -52,10 +71,12 @@ def _evidence(df: pd.DataFrame, spec: dict, base_status: str) -> str | None:
     """Контрфактически: удаление какой одной транзакции меняет вердикт."""
     if spec["is_ratio"]:
         return None
+    df = _apply_amendments(df, spec)
+    extra = spec.get("off_ledger_amounts_usd")
     candidates = []
     for txn_id in spec["relevant_txn_ids"]:
         rest = [t for t in spec["relevant_txn_ids"] if t != txn_id]
-        alt = _verdict(_sum_usd(df, rest).quantize(TWO, ROUND_HALF_UP), spec)
+        alt = _verdict(_sum_usd(df, rest, extra).quantize(TWO, ROUND_HALF_UP), spec)
         if alt != base_status:
             candidates.append(txn_id)
     return candidates[0] if len(candidates) == 1 else None

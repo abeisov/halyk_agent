@@ -72,6 +72,12 @@ def extract_clauses() -> dict[str, dict[str, str]]:
 
 # ---------- этап 2: LLM -> спецификация ----------
 
+class LedgerAmendment(BaseModel):
+    """Сумма операции, отсутствующая/исправленная в реестре, из документов."""
+    txn_id: str
+    amount_usd: float = Field(description="Фактическая сумма в USD; расход — отрицательная")
+
+
 class CovenantSpec(BaseModel):
     """Что LLM извлекает из пункта. Числа из ответа LLM в submission не попадают:
     threshold — порог из текста договора, суммы считает pandas."""
@@ -85,6 +91,10 @@ class CovenantSpec(BaseModel):
     carve_out_reasoning: str = Field(description="Какая оговорка есть в пункте и выполнена ли, иначе пустая строка")
     relevant_txn_ids: list[str] = Field(description="Транзакции в скоупе метрики (числитель для коэффициента)")
     denominator_txn_ids: list[str] = Field(description="Транзакции знаменателя (только для коэффициентов, иначе пусто)")
+    ledger_amendments: list[LedgerAmendment] = Field(
+        description="Операции из скоупа с amount_missing=True или исправленные: их фактические суммы, раскрытые в документах")
+    off_ledger_amounts_usd: list[float] = Field(
+        description="Суммы, раскрытые в документах для агрегирования по этой метрике, но не отражённые в реестре отдельной операцией; расход — отрицательная")
     confidence: float = Field(description="Уверенность 0..1")
 
 
@@ -94,11 +104,11 @@ PROMPT = """Ты компилируешь пункт кредитного дог
 ПУНКТ ДОГОВОРА ({scenario} {clause}):
 {clause_text}
 
-ЛЕДЖЕР (txn_id, date, counterparty, description, amount, currency, amount_usd; расходы отрицательные):
+ЛЕДЖЕР (расходы отрицательные; amount_missing=True — сумма не выгружена, ищи в документах):
 {ledger_csv}
 
-СПРАВОЧНЫЕ ДОКУМЕНТЫ ЗАЁМЩИКА (KYC — определяет связанные стороны; аудит — дополнение
-о соблюдении ковенантов, переклассификации, валютные курсы):
+СПРАВОЧНЫЕ ДОКУМЕНТЫ ЗАЁМЩИКА (KYC — определяет связанные стороны; аудит и служебные
+записки — раскрытия сумм, переклассификации, валютные курсы, внекнижные обязательства):
 {support_text}
 
 Задача:
@@ -107,13 +117,20 @@ PROMPT = """Ты компилируешь пункт кредитного дог
    назначению платежа и контрагенту. Для коэффициентов отдельно знаменатель.
 3. Внимательно проверь оговорки (carve-outs) и условия применимости (триггеры)
    в тексте пункта: превышение может быть допустимым, ковенант может не действовать.
-4. Не считай суммы — только классифицируй. Верни строго JSON по схеме."""
+4. Реестр «грязный»: у операции с amount_missing=True сумма не выгружена —
+   найди её фактическую сумму в документах (ledger_amendments). Если документы
+   раскрывают сумму для агрегирования, которой нет в реестре отдельной строкой,
+   укажи её в off_ledger_amounts_usd.
+5. Не агрегируй суммы сам — классифицируй операции и дословно переноси
+   раскрытые в документах значения. Верни строго JSON по схеме."""
 
 
 def support_texts() -> dict[str, str]:
     """scenario_id -> текст действующих KYC и аудиторских отчётов (для промпта)."""
     idx = pd.read_csv(DOC_INDEX)
-    docs = idx[idx["doc_type"].isin(["kyc", "audit_report"]) & (~idx["is_void"])]
+    # все действующие документы сценария, кроме самого договора:
+    # KYC (связанные стороны), аудит (раскрытия), прочее (служебные записки)
+    docs = idx[(idx["doc_type"] != "loan_agreement") & (~idx["is_void"])]
     out: dict[str, str] = {}
     for _, row in docs.iterrows():
         scen = row["scenario_id"]
@@ -134,14 +151,20 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
         raise SystemExit("Нет GEMINI_API_KEY в .env — этап LLM пропущен. "
                          "Ключ: aistudio.google.com")
     client = genai.Client(api_key=api_key)
-    model = os.environ.get("MODEL_MAIN", "gemini-2.5-flash")
+    # дневная квота бесплатного тира считается на модель — при исчерпании
+    # переключаемся на следующую модель насовсем
+    model_chain = [os.environ.get("MODEL_MAIN", "gemini-3.6-flash"),
+                   "gemini-3.5-flash", "gemini-flash-latest",
+                   "gemini-3-flash-preview", "gemini-2.5-flash-lite"]
+    model_i = 0
 
     specs: dict[str, dict[str, dict]] = {}
     if SPECS_JSON.exists():  # докомпиляция после падения — не пережигать вызовы
         specs = json.load(open(SPECS_JSON))
 
     support = support_texts()
-    cols = ["txn_id", "date", "counterparty", "description", "amount", "currency", "amount_usd"]
+    cols = ["txn_id", "date", "counterparty", "description", "amount", "currency",
+            "amount_usd", "amount_missing"]
     for scen, cls in clauses.items():
         ledger_csv = df[df["scenario_id"] == scen][cols].to_csv(index=False)
         for clause, clause_text in sorted(cls.items()):
@@ -151,10 +174,10 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
                                    clause_text=clause_text, ledger_csv=ledger_csv,
                                    support_text=support.get(scen, "(нет)"))
             last_err = None
-            for attempt in range(3):
+            for attempt in range(6):
                 try:
                     resp = client.models.generate_content(
-                        model=model,
+                        model=model_chain[model_i],
                         contents=prompt,
                         config={
                             "temperature": 0,
@@ -167,7 +190,11 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
                     break
                 except Exception as e:  # ретрай с паузой, потом дальше
                     last_err = e
-                    time.sleep(5 * (attempt + 1))
+                    if "PerDay" in str(e) and model_i + 1 < len(model_chain):
+                        model_i += 1  # дневная квота модели сгорела — следующая
+                        print(f"  .. квота исчерпана, переключаюсь на {model_chain[model_i]}")
+                        continue
+                    time.sleep(10 * (attempt + 1))
             else:
                 print(f"  !! {scen} {clause}: LLM не ответил: {last_err}")
             SPECS_JSON.write_text(json.dumps(specs, ensure_ascii=False, indent=2))

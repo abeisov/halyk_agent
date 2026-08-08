@@ -26,7 +26,10 @@ TXN_ID_RE = r"^TXN-(.+)-\d+$"
 
 def load_ledger(path: Path = LEDGER_CSV) -> pd.DataFrame:
     df = pd.read_csv(path, dtype=str)
-    df["amount"] = df["amount"].map(Decimal)
+    # «грязные» строки: пустая сумма означает, что фактическая сумма
+    # раскрыта в документах (поправка придёт из спецификации ковенанта)
+    df["amount_missing"] = df["amount"].isna()
+    df["amount"] = df["amount"].fillna("0").map(Decimal)
 
     df["scenario_id"] = df["txn_id"].str.extract(TXN_ID_RE)
     if df["scenario_id"].isna().any():
