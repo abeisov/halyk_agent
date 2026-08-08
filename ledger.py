@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pandas as pd
 
-LEDGER_CSV = Path("data/public/master_ledger_2025.csv")
+import paths
 
-# currency -> курс к USD (источник: см. докстринг модуля)
-FX_RATES: dict[str, Decimal] = {
+# запасные курсы, если из документов извлечь не удалось (публичный датасет)
+FALLBACK_FX: dict[str, Decimal] = {
     "USD": Decimal("1"),
     "EUR": Decimal("1.16"),
 }
@@ -24,8 +24,8 @@ FX_RATES: dict[str, Decimal] = {
 TXN_ID_RE = r"^TXN-(.+)-\d+$"
 
 
-def load_ledger(path: Path = LEDGER_CSV) -> pd.DataFrame:
-    df = pd.read_csv(path, dtype=str)
+def load_ledger(path: Path | None = None) -> pd.DataFrame:
+    df = pd.read_csv(path or paths.ledger(), dtype=str)
     # «грязные» строки: пустая сумма означает, что фактическая сумма
     # раскрыта в документах (поправка придёт из спецификации ковенанта)
     df["amount_missing"] = df["amount"].isna()
@@ -36,13 +36,32 @@ def load_ledger(path: Path = LEDGER_CSV) -> pd.DataFrame:
         bad = df.loc[df["scenario_id"].isna(), "txn_id"].tolist()
         raise ValueError(f"txn_id вне формата TXN-<scenario>-<NNNN>: {bad[:5]}")
 
-    unknown = set(df["currency"]) - set(FX_RATES)
-    if unknown:
-        raise ValueError(f"Нет курса к USD для валют: {sorted(unknown)}")
+    rates = fx_rates(set(df["currency"]))
     df["amount_usd"] = df.apply(
-        lambda r: r["amount"] * FX_RATES[r["currency"]], axis=1
+        lambda r: r["amount"] * rates[r["currency"]], axis=1
     )
     return df
+
+
+def fx_rates(currencies: set[str]) -> dict[str, Decimal]:
+    """Курсы из документов; чего не нашлось — из запасной таблицы."""
+    import fx
+
+    try:
+        rates = fx.extract_rates(currencies)
+    except Exception as e:
+        print(f"  !! извлечение курсов упало: {e}")
+        rates = {"USD": Decimal("1")}
+    for code in currencies - set(rates):
+        if code in FALLBACK_FX:
+            print(f"  !! курс {code} не найден в документах, беру запасной "
+                  f"{FALLBACK_FX[code]}")
+            rates[code] = FALLBACK_FX[code]
+        else:
+            raise ValueError(
+                f"Нет курса к USD для валюты {code}: не найден в документах и "
+                f"нет запасного. Считать в валюте операции нельзя — промах в разы.")
+    return rates
 
 
 def account_map(df: pd.DataFrame) -> dict[str, str]:

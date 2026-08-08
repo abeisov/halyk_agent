@@ -58,12 +58,19 @@ documents/*.pdf ────────→ docs.py      атрибуция PDF 
 ```bash
 python3 -m venv venv && venv/bin/pip install -r requirements.txt
 cp .env.example .env          # вписать GEMINI_API_KEY (aistudio.google.com)
-venv/bin/python run.py        # -> submission.json (+ score, если есть ground truth)
+
+venv/bin/python run.py                                    # data/public -> submission.json
+venv/bin/python run.py --input data/private --output submission.json
+venv/bin/python run.py --skip-llm                         # пересчёт из кэша спецификаций
 ```
 
-Датасет кладётся в `data/public/` (в репозиторий не входит). Список сценариев
-читается из `submission_template.json` — в коде не захардкожен ни один сценарий,
-контрагент или номер транзакции.
+Датасет кладётся в любую папку с `master_ledger_2025.csv`, `documents/` и
+`submission_template.json` (в репозиторий данные не входят). Производные файлы
+каждого набора складываются отдельно, в `data/processed/<имя набора>/`.
+
+Ничего не захардкожено: список сценариев читается из шаблона, курсы валют
+извлекаются из документов, ни один контрагент или номер транзакции в коде не
+упомянут.
 
 ## Стек
 

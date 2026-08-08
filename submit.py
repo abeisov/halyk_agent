@@ -11,13 +11,13 @@ from pathlib import Path
 
 import pandas as pd
 
-TEMPLATE = Path("data/public/submission_template.json")
+import paths
 
 DEFAULT_CELL = {"status": "COMPLIANT", "actual": 1.00, "evidence_txn_id": None}
 
 
 def build_submission(cells: dict, out_path: Path) -> dict:
-    sub = json.load(open(TEMPLATE))
+    sub = json.load(open(paths.template()))
     sub["team"] = os.environ.get("TEAM", "halyk-covenant-agent")
     sub["contact_email"] = os.environ.get("CONTACT_EMAIL", "anuar.beisov1992@gmail.com")
     sub["model"] = os.environ.get("MODEL_MAIN", "gemini-2.5-flash")
@@ -42,7 +42,7 @@ def build_submission(cells: dict, out_path: Path) -> dict:
 
 def validate(sub: dict, ledger_df: pd.DataFrame) -> list[str]:
     errors = []
-    template = json.load(open(TEMPLATE))
+    template = json.load(open(paths.template()))
     known_txns = set(ledger_df["txn_id"])
 
     for field in ("team", "contact_email", "model"):

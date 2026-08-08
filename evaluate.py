@@ -16,7 +16,7 @@ import pandas as pd
 
 from ledger import load_ledger
 
-SPECS_JSON = Path("data/processed/specs.json")
+import paths
 
 TWO = Decimal("0.01")
 
@@ -116,7 +116,7 @@ def evaluate_all(specs: dict, df: pd.DataFrame) -> dict:
 
 
 if __name__ == "__main__":
-    specs = json.load(open(SPECS_JSON))
+    specs = json.load(open(paths.processed("specs.json")))
     cells = evaluate_all(specs, load_ledger())
     for scen, clauses in sorted(cells.items()):
         for clause, cell in sorted(clauses.items()):

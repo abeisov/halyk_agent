@@ -25,11 +25,7 @@ from pydantic import BaseModel, Field
 
 from ledger import load_ledger
 
-DOCS_DIR = Path("data/public/documents")
-DOC_INDEX = Path("data/processed/doc_index.csv")
-CLAUSES_JSON = Path("data/processed/clauses.json")
-SPECS_JSON = Path("data/processed/specs.json")
-TEMPLATE = Path("data/public/submission_template.json")
+import paths
 
 SECTION_RE = re.compile(r"Статья 6 — ")
 NEXT_SECTION_RE = re.compile(r"Статья 7 — ")
@@ -41,16 +37,16 @@ CLAUSE_NUM_RE = re.compile(r"^Пункт (6\.\d+)")
 
 def extract_clauses() -> dict[str, dict[str, str]]:
     """scenario_id -> {clause -> дословный текст пункта}."""
-    idx = pd.read_csv(DOC_INDEX)
+    idx = pd.read_csv(paths.processed("doc_index.csv"))
     contracts = idx[(idx["doc_type"] == "loan_agreement") & (~idx["is_void"])]
-    template_scenarios = list(json.load(open(TEMPLATE))["answers"])
+    template_scenarios = list(json.load(open(paths.template()))["answers"])
 
     out: dict[str, dict[str, str]] = {}
     for _, row in contracts.iterrows():
         scen = row["scenario_id"]
         if scen not in template_scenarios:
             continue
-        with pymupdf.open(DOCS_DIR / row["doc_id"]) as doc:
+        with pymupdf.open(paths.documents() / row["doc_id"]) as doc:
             text = "\n".join(p.get_text() for p in doc)
         m6 = SECTION_RE.search(text)
         m7 = NEXT_SECTION_RE.search(text, m6.end()) if m6 else None
@@ -161,7 +157,7 @@ PROMPT = """Ты компилируешь пункт кредитного дог
 
 def support_texts() -> dict[str, str]:
     """scenario_id -> текст действующих KYC и аудиторских отчётов (для промпта)."""
-    idx = pd.read_csv(DOC_INDEX)
+    idx = pd.read_csv(paths.processed("doc_index.csv"))
     # все действующие документы сценария, кроме самого договора:
     # KYC (связанные стороны), аудит (раскрытия), прочее (служебные записки)
     docs = idx[(idx["doc_type"] != "loan_agreement") & (~idx["is_void"])]
@@ -170,7 +166,7 @@ def support_texts() -> dict[str, str]:
         scen = row["scenario_id"]
         if pd.isna(scen):
             continue
-        with pymupdf.open(DOCS_DIR / row["doc_id"]) as doc:
+        with pymupdf.open(paths.documents() / row["doc_id"]) as doc:
             text = "\n".join(p.get_text() for p in doc)
         out[scen] = out.get(scen, "") + f"\n--- {row['doc_type']} {row['doc_id']} ---\n{text}"
     return {s: t[:60000] for s, t in out.items()}
@@ -195,8 +191,8 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
     model_i = 0
 
     specs: dict[str, dict[str, dict]] = {}
-    if SPECS_JSON.exists():  # докомпиляция после падения — не пережигать вызовы
-        specs = json.load(open(SPECS_JSON))
+    if paths.processed("specs.json").exists():  # докомпиляция после падения — не пережигать вызовы
+        specs = json.load(open(paths.processed("specs.json")))
 
     support = support_texts()
     cols = ["txn_id", "date", "counterparty", "description", "amount", "currency",
@@ -239,7 +235,7 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
                     time.sleep(10 * (attempt + 1))
             else:
                 print(f"  !! {scen} {clause}: LLM не ответил: {last_err}")
-            SPECS_JSON.write_text(json.dumps(specs, ensure_ascii=False, indent=2))
+            paths.processed("specs.json").write_text(json.dumps(specs, ensure_ascii=False, indent=2))
             print(f"  {scen} {clause}: "
                   f"{'ok' if specs.get(scen, {}).get(clause) else 'FAIL'}")
     return specs
@@ -248,14 +244,14 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
 if __name__ == "__main__":
     load_dotenv()
     clauses = extract_clauses()
-    CLAUSES_JSON.parent.mkdir(parents=True, exist_ok=True)
-    CLAUSES_JSON.write_text(json.dumps(clauses, ensure_ascii=False, indent=2))
+    paths.processed("clauses.json").parent.mkdir(parents=True, exist_ok=True)
+    paths.processed("clauses.json").write_text(json.dumps(clauses, ensure_ascii=False, indent=2))
     n = sum(len(v) for v in clauses.values())
-    print(f"Пункты: {n} шт. по {len(clauses)} сценариям -> {CLAUSES_JSON}")
+    print(f"Пункты: {n} шт. по {len(clauses)} сценариям -> {paths.processed("clauses.json")}")
 
     if "--clauses-only" in sys.argv:
         sys.exit(0)
 
     specs = compile_specs(clauses, load_ledger())
     done = sum(1 for s in specs.values() for _ in s)
-    print(f"Спецификаций: {done}/{n} -> {SPECS_JSON}")
+    print(f"Спецификаций: {done}/{n} -> {paths.processed("specs.json")}")

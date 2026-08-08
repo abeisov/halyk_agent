@@ -12,10 +12,8 @@ from pathlib import Path
 import pymupdf
 import pandas as pd
 
+import paths
 from ledger import load_ledger, account_map
-
-DOCS_DIR = Path("data/public/documents")
-OUT_CSV = Path("data/processed/doc_index.csv")
 
 ACC_RE = re.compile(r"ACC-\d+")
 
@@ -53,7 +51,7 @@ def guess_doc_type(text: str) -> str:
 def build_doc_index() -> pd.DataFrame:
     acc_map = account_map(load_ledger())
     rows = []
-    for pdf in sorted(DOCS_DIR.glob("*.pdf")):
+    for pdf in sorted(paths.documents().glob("*.pdf")):
         text, n_pages = extract_text(pdf)
         accs = Counter(ACC_RE.findall(text))
         # сценарии, на счета которых ссылается документ (по убыванию частоты)
@@ -79,10 +77,10 @@ if __name__ == "__main__":
     import json
 
     df = build_doc_index()
-    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(OUT_CSV, index=False)
+    out_csv = paths.processed("doc_index.csv")
+    df.to_csv(out_csv, index=False)
 
-    template = json.load(open("data/public/submission_template.json"))
+    template = json.load(open(paths.template()))
     scenarios = list(template["answers"])
 
     print(f"Документов: {len(df)}, без атрибуции: {df['scenario_id'].isna().sum()}")
@@ -103,4 +101,4 @@ if __name__ == "__main__":
 
     outside = attributed[~attributed["scenario_id"].isin(scenarios)]
     print(f"\nДокументы вне шаблонных сценариев: {len(outside)}")
-    print(f"Индекс записан: {OUT_CSV}")
+    print(f"Индекс записан: {out_csv}")

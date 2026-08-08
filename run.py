@@ -13,13 +13,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-SUBMISSION = Path("submission.json")
-SPECS_JSON = Path("data/processed/specs.json")
-GROUND_TRUTH = Path("data/public/ground_truth.json")
+import paths
 
 
 def main() -> None:
-    load_dotenv()
+    load_dotenv(".env")
+    args = sys.argv[1:]
+    if "--input" in args:
+        paths.set_input(args[args.index("--input") + 1])
+    submission = Path(args[args.index("--output") + 1]) if "--output" in args \
+        else Path("submission.json")
+    print(f"Датасет: {paths.INPUT_DIR}  ->  {submission}")
 
     print("[1/5] Реестр...")
     from ledger import load_ledger
@@ -27,29 +31,28 @@ def main() -> None:
 
     print("[2/5] Атрибуция документов...")
     try:
-        from docs import build_doc_index, OUT_CSV
-        OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-        build_doc_index().to_csv(OUT_CSV, index=False)
+        from docs import build_doc_index
+        build_doc_index().to_csv(paths.processed("doc_index.csv"), index=False)
     except Exception as e:
         print(f"  !! атрибуция упала: {e} (использую старый doc_index.csv)")
 
     print("[3/5] Компиляция ковенантов...")
     specs = {}
     try:
-        from compile import extract_clauses, compile_specs, CLAUSES_JSON
+        from compile import extract_clauses, compile_specs
         clauses = extract_clauses()
-        CLAUSES_JSON.write_text(json.dumps(clauses, ensure_ascii=False, indent=2))
+        paths.processed("clauses.json").write_text(json.dumps(clauses, ensure_ascii=False, indent=2))
         if "--skip-llm" in sys.argv:
-            specs = json.loads(SPECS_JSON.read_text()) if SPECS_JSON.exists() else {}
+            specs = json.loads(paths.processed("specs.json").read_text()) if paths.processed("specs.json").exists() else {}
             print(f"  LLM пропущен, кэш: {sum(len(v) for v in specs.values())} спецификаций")
         else:
             specs = compile_specs(clauses, df)
     except SystemExit as e:
         print(f"  !! {e}")
-        specs = json.loads(SPECS_JSON.read_text()) if SPECS_JSON.exists() else {}
+        specs = json.loads(paths.processed("specs.json").read_text()) if paths.processed("specs.json").exists() else {}
     except Exception as e:
         print(f"  !! компиляция упала: {e}")
-        specs = json.loads(SPECS_JSON.read_text()) if SPECS_JSON.exists() else {}
+        specs = json.loads(paths.processed("specs.json").read_text()) if paths.processed("specs.json").exists() else {}
 
     print("[4/5] Расчёт ячеек...")
     from evaluate import evaluate_all
@@ -57,19 +60,19 @@ def main() -> None:
 
     print("[5/5] Сборка и валидация...")
     from submit import build_submission, validate
-    sub = build_submission(cells, SUBMISSION)
+    sub = build_submission(cells, submission)
     errors = validate(sub, df)
     if errors:
         print("ВАЛИДАЦИЯ ПРОВАЛЕНА:")
         for e in errors:
             print("  -", e)
         sys.exit(1)
-    print(f"OK: {SUBMISSION} собран и валиден.")
+    print(f"OK: {submission} собран и валиден.")
 
-    if GROUND_TRUTH.exists():
+    if paths.ground_truth().exists():
         print("\n--- score по публичному GT ---")
         import score
-        score.main(str(SUBMISSION), str(GROUND_TRUTH))
+        score.main(str(submission), str(paths.ground_truth()))
 
 
 if __name__ == "__main__":
