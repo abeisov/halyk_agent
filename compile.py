@@ -84,6 +84,7 @@ class CovenantSpec(BaseModel):
     analysis: str = Field(description="Рассуждение: что измеряем, какие операции в скоупе и почему, что говорят carve-outs/триггеры/раскрытия документов. Заполняется ПЕРВЫМ")
     metric_description: str = Field(description="Что измеряет ковенант, одной фразой")
     is_ratio: bool = Field(description="True, если метрика — коэффициент, а не сумма в USD")
+    aggregation: str = Field(description="'sum' — метрика есть сумма отобранных операций (обычный случай); 'max' — ковенант проверяется по НАИБОЛЬШЕЙ из отдельных статей, а не по их сумме")
     threshold: float = Field(description="Числовой порог из текста пункта")
     direction: str = Field(description="'max' — нарушение при превышении порога, 'min' — при значении ниже порога")
     trigger_active: bool = Field(description="False только если ковенант применяется при условии (триггере), и это условие НЕ сработало")
@@ -119,9 +120,16 @@ PROMPT = """Ты компилируешь пункт кредитного дог
 Задача:
 1. Определи метрику, порог (threshold) и направление (direction).
 2. Отбери transaction ids, входящие в скоуп метрики (relevant_txn_ids) — по
-   назначению платежа и контрагенту. Для коэффициентов отдельно знаменатель:
-   если знаменатель (EBITDA, долг, выручка и т.п.) не считается из операций
-   реестра, а раскрыт в аудите — положи его в denominator_off_ledger_usd.
+   назначению платежа и контрагенту. Для коэффициентов ОБЯЗАТЕЛЬНО заполни
+   знаменатель, иначе ячейка потеряна. Базовые определения:
+   - Выручка = поступления (положительные amount_usd) от основной деятельности;
+   - Операционные расходы = операционные списания (отрицательные);
+   - EBITDA = Выручка минус Операционные расходы -> так как это разность, а не
+     набор операций, посчитай её НЕЛЬЗЯ: положи в denominator_txn_ids ВСЕ
+     операции выручки и всех операционных расходов — код сложит их со знаком
+     и получит EBITDA сам.
+   Если величина знаменателя раскрыта готовым числом в аудите (например,
+   консолидированный показатель Группы) — положи её в denominator_off_ledger_usd.
 3. Внимательно проверь оговорки (carve-outs) и условия применимости (триггеры)
    в тексте пункта: превышение может быть допустимым, ковенант может не действовать.
 4. Реестр «грязный»: у операции с amount_missing=True сумма не выгружена —
@@ -202,6 +210,12 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
                         },
                     )
                     spec = CovenantSpec.model_validate_json(resp.text)
+                    if spec.is_ratio and not (spec.denominator_txn_ids
+                                              or spec.denominator_off_ledger_usd):
+                        raise ValueError("коэффициент без знаменателя: заполни "
+                                         "denominator_txn_ids или denominator_off_ledger_usd")
+                    if not (spec.relevant_txn_ids or spec.off_ledger_amounts_usd):
+                        raise ValueError("пустой числитель: ни одной операции в скоупе")
                     specs.setdefault(scen, {})[clause] = spec.model_dump()
                     break
                 except Exception as e:  # ретрай с паузой, потом дальше

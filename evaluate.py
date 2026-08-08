@@ -58,6 +58,11 @@ def _verdict(actual: Decimal, spec: dict) -> str:
 
 def _compute_actual(df: pd.DataFrame, spec: dict) -> Decimal:
     df = _apply_amendments(df, spec)
+    if spec.get("aggregation") == "max":
+        # ковенант проверяется по наибольшей из статей, а не по их сумме
+        vals = [abs(v) for v in df[df["txn_id"].isin(spec["relevant_txn_ids"])]["amount_usd"]]
+        vals += [abs(Decimal(str(x))) for x in (spec.get("off_ledger_amounts_usd") or [])]
+        return max(vals).quantize(TWO, ROUND_HALF_UP) if vals else Decimal(0)
     num = _sum_usd(df, spec["relevant_txn_ids"], spec.get("off_ledger_amounts_usd"))
     if spec["is_ratio"]:
         den = _sum_usd(df, spec["denominator_txn_ids"],
@@ -70,22 +75,17 @@ def _compute_actual(df: pd.DataFrame, spec: dict) -> Decimal:
 
 def _evidence(df: pd.DataFrame, spec: dict, base_status: str) -> str | None:
     """Контрфактически: удаление какой одной транзакции меняет вердикт."""
-    if spec["is_ratio"]:
-        return None
     df = _apply_amendments(df, spec)
-    extra = spec.get("off_ledger_amounts_usd")
     candidates = []
     for txn_id in spec["relevant_txn_ids"]:
-        rest = [t for t in spec["relevant_txn_ids"] if t != txn_id]
-        alt = _verdict(_sum_usd(df, rest, extra).quantize(TWO, ROUND_HALF_UP), spec)
-        if alt != base_status:
+        alt = dict(spec, relevant_txn_ids=[t for t in spec["relevant_txn_ids"] if t != txn_id])
+        if _verdict(_compute_actual(df, alt), alt) != base_status:
             candidates.append(txn_id)
     # исключённая по предписанию документов операция — улика, если её
     # ВКЛЮЧЕНИЕ обратно меняет вердикт
     for txn_id in spec.get("excluded_txn_ids") or []:
-        added = spec["relevant_txn_ids"] + [txn_id]
-        alt = _verdict(_sum_usd(df, added, extra).quantize(TWO, ROUND_HALF_UP), spec)
-        if alt != base_status:
+        alt = dict(spec, relevant_txn_ids=spec["relevant_txn_ids"] + [txn_id])
+        if _verdict(_compute_actual(df, alt), alt) != base_status:
             candidates.append(txn_id)
     return candidates[0] if len(candidates) == 1 else None
 
