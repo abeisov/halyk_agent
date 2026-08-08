@@ -60,7 +60,8 @@ def _compute_actual(df: pd.DataFrame, spec: dict) -> Decimal:
     df = _apply_amendments(df, spec)
     num = _sum_usd(df, spec["relevant_txn_ids"], spec.get("off_ledger_amounts_usd"))
     if spec["is_ratio"]:
-        den = _sum_usd(df, spec["denominator_txn_ids"])
+        den = _sum_usd(df, spec["denominator_txn_ids"],
+                       spec.get("denominator_off_ledger_usd"))
         if den == 0:
             raise ZeroDivisionError("пустой знаменатель коэффициента")
         return (num / den).quantize(TWO, ROUND_HALF_UP)
@@ -77,6 +78,13 @@ def _evidence(df: pd.DataFrame, spec: dict, base_status: str) -> str | None:
     for txn_id in spec["relevant_txn_ids"]:
         rest = [t for t in spec["relevant_txn_ids"] if t != txn_id]
         alt = _verdict(_sum_usd(df, rest, extra).quantize(TWO, ROUND_HALF_UP), spec)
+        if alt != base_status:
+            candidates.append(txn_id)
+    # исключённая по предписанию документов операция — улика, если её
+    # ВКЛЮЧЕНИЕ обратно меняет вердикт
+    for txn_id in spec.get("excluded_txn_ids") or []:
+        added = spec["relevant_txn_ids"] + [txn_id]
+        alt = _verdict(_sum_usd(df, added, extra).quantize(TWO, ROUND_HALF_UP), spec)
         if alt != base_status:
             candidates.append(txn_id)
     return candidates[0] if len(candidates) == 1 else None
