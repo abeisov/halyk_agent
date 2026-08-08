@@ -77,7 +77,7 @@ class LedgerAmendment(BaseModel):
 class CovenantSpec(BaseModel):
     """Что LLM извлекает из пункта. Числа из ответа LLM в submission не попадают:
     threshold — порог из текста договора, суммы считает pandas."""
-    analysis: str = Field(description="Рассуждение: что измеряем, какие операции в скоупе и почему, что говорят carve-outs/триггеры/раскрытия документов. Заполняется ПЕРВЫМ")
+    analysis: str = Field(description="Кратко (до 3 предложений): что измеряем, по какому признаку отобраны операции, что предписали документы. Заполняется ПЕРВЫМ")
     metric_description: str = Field(description="Что измеряет ковенант, одной фразой")
     is_ratio: bool = Field(description="True, если метрика — коэффициент, а не сумма в USD")
     aggregation: str = Field(description="'sum' — метрика есть сумма отобранных операций (обычный случай); 'max' — ковенант проверяется по НАИБОЛЬШЕЙ из отдельных статей, а не по их сумме")
@@ -155,6 +155,27 @@ PROMPT = """Ты компилируешь пункт кредитного дог
    раскрытые в документах значения. Верни строго JSON по схеме."""
 
 
+# секции документов, влияющие на расчёт: раскрытия, а не учётная политика
+RELEVANT_MARKERS = ("связанн", "аффилир", "ковенант", "курс", "переклассифиц",
+                    "не отражена", "не отражается", "раскрывается", "исключена",
+                    "TXN-", "$")
+SECTION_SPLIT_RE = re.compile(r"(?=Примечание \d+ —|ДОПОЛНЕНИЕ О СОБЛЮДЕНИИ|"
+                              r"^[А-ЯA-Z][А-ЯA-Z ·—-]{12,}$)", re.M)
+
+
+def trim_document(text: str, doc_type: str) -> str:
+    """Выбрасывает шаблонные разделы, оставляя раскрытия и списки контрагентов.
+
+    Аудиторские отчёты наполовину состоят из учётной политики, одинаковой у всех
+    заёмщиков: она не влияет на расчёт, но раздувает промпт и добавляет шум.
+    """
+    if doc_type == "kyc" or len(text) < 3000:
+        return text  # KYC — сам по себе список связанных сторон, режем только крупное
+    kept = [s for s in SECTION_SPLIT_RE.split(text)
+            if any(m in s for m in RELEVANT_MARKERS)]
+    return "\n".join(kept) if kept else text[:3000]
+
+
 def support_texts() -> dict[str, str]:
     """scenario_id -> текст действующих KYC и аудиторских отчётов (для промпта)."""
     idx = pd.read_csv(paths.processed("doc_index.csv"))
@@ -168,31 +189,16 @@ def support_texts() -> dict[str, str]:
             continue
         with pymupdf.open(paths.documents() / row["doc_id"]) as doc:
             text = "\n".join(p.get_text() for p in doc)
+        text = trim_document(text, row["doc_type"])
         out[scen] = out.get(scen, "") + f"\n--- {row['doc_type']} {row['doc_id']} ---\n{text}"
     return {s: t[:60000] for s, t in out.items()}
 
 
 def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
-    import os
-    from google import genai
+    import llm
 
-    # ключи из разных проектов: GEMINI_API_KEY, GEMINI_API_KEY_2, ...
-    keys = [os.environ[k] for k in
-            ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY_{i}" for i in range(2, 10)]
-            if os.environ.get(k)]
-    if not keys:
-        raise SystemExit("Нет GEMINI_API_KEY в .env — этап LLM пропущен. "
-                         "Ключ: aistudio.google.com")
-    # дневная квота бесплатного тира считается на пару (проект, модель):
-    # исчерпалась — берём следующую модель, кончились модели — следующий ключ
-    model_chain = [os.environ.get("MODEL_MAIN", "gemini-3.6-flash"),
-                   "gemini-3.5-flash", "gemini-flash-latest",
-                   "gemini-3-flash-preview", "gemini-3.5-flash-lite",
-                   "gemini-3.1-flash-lite", "gemini-flash-lite-latest",
-                   "gemini-pro-latest"]
-    key_i = model_i = 0
-    client = genai.Client(api_key=keys[0])
-    print(f"  ключей: {len(keys)}, моделей в цепочке: {len(model_chain)}")
+    router = llm.Router()
+    schema = CovenantSpec.model_json_schema()
 
     specs: dict[str, dict[str, dict]] = {}
     if paths.processed("specs.json").exists():  # докомпиляция после падения — не пережигать вызовы
@@ -210,46 +216,26 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
                                    clause_text=clause_text, ledger_csv=ledger_csv,
                                    support_text=support.get(scen, "(нет)"))
             last_err = None
-            for attempt in range(6):
+            for attempt in range(3):
                 try:
-                    resp = client.models.generate_content(
-                        model=model_chain[model_i],
-                        contents=prompt,
-                        config={
-                            "temperature": 0,
-                            "response_mime_type": "application/json",
-                            "response_schema": CovenantSpec,
-                        },
-                    )
-                    spec = CovenantSpec.model_validate_json(resp.text)
+                    raw = router.complete(prompt, schema)
+                    spec = CovenantSpec.model_validate_json(raw)
                     if spec.is_ratio and not (spec.denominator_txn_ids
                                               or spec.denominator_off_ledger_usd):
-                        raise ValueError("коэффициент без знаменателя: заполни "
-                                         "denominator_txn_ids или denominator_off_ledger_usd")
+                        raise ValueError("коэффициент без знаменателя")
                     if not (spec.relevant_txn_ids or spec.off_ledger_amounts_usd):
                         raise ValueError("пустой числитель: ни одной операции в скоупе")
                     specs.setdefault(scen, {})[clause] = spec.model_dump()
                     break
-                except Exception as e:  # ретрай с паузой, потом дальше
+                except Exception as e:
                     last_err = e
-                    if "PerDay" in str(e) or "NOT_FOUND" in str(e):
-                        if model_i + 1 < len(model_chain):
-                            model_i += 1
-                            print(f"  .. квота/модель исчерпана -> {model_chain[model_i]}")
-                            continue
-                        if key_i + 1 < len(keys):  # модели кончились — новый проект
-                            key_i += 1
-                            model_i = 0
-                            client = genai.Client(api_key=keys[key_i])
-                            print(f"  .. переключаюсь на ключ #{key_i + 1}, "
-                                  f"модель {model_chain[0]}")
-                            continue
-                    time.sleep(10 * (attempt + 1))
+                    if "исчерпан" in str(e):
+                        break  # цепочка кончилась — дальше бессмысленно
             else:
-                print(f"  !! {scen} {clause}: LLM не ответил: {last_err}")
+                print(f"  !! {scen} {clause}: {last_err}")
             paths.processed("specs.json").write_text(json.dumps(specs, ensure_ascii=False, indent=2))
-            print(f"  {scen} {clause}: "
-                  f"{'ok' if specs.get(scen, {}).get(clause) else 'FAIL'}")
+            got = specs.get(scen, {}).get(clause)
+            print(f"  {scen} {clause}: {'ok' if got else 'FAIL'} [{router.current}]")
     return specs
 
 
