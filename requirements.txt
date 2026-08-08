@@ -1,0 +1,5 @@
+pandas
+pymupdf
+pydantic
+google-genai
+python-dotenv
