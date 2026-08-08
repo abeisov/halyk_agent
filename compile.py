@@ -176,19 +176,23 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
     import os
     from google import genai
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
+    # ключи из разных проектов: GEMINI_API_KEY, GEMINI_API_KEY_2, ...
+    keys = [os.environ[k] for k in
+            ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY_{i}" for i in range(2, 10)]
+            if os.environ.get(k)]
+    if not keys:
         raise SystemExit("Нет GEMINI_API_KEY в .env — этап LLM пропущен. "
                          "Ключ: aistudio.google.com")
-    client = genai.Client(api_key=api_key)
-    # дневная квота бесплатного тира считается на модель — при исчерпании
-    # переключаемся на следующую модель насовсем
+    # дневная квота бесплатного тира считается на пару (проект, модель):
+    # исчерпалась — берём следующую модель, кончились модели — следующий ключ
     model_chain = [os.environ.get("MODEL_MAIN", "gemini-3.6-flash"),
                    "gemini-3.5-flash", "gemini-flash-latest",
                    "gemini-3-flash-preview", "gemini-3.5-flash-lite",
                    "gemini-3.1-flash-lite", "gemini-flash-lite-latest",
                    "gemini-pro-latest"]
-    model_i = 0
+    key_i = model_i = 0
+    client = genai.Client(api_key=keys[0])
+    print(f"  ключей: {len(keys)}, моделей в цепочке: {len(model_chain)}")
 
     specs: dict[str, dict[str, dict]] = {}
     if paths.processed("specs.json").exists():  # докомпиляция после падения — не пережигать вызовы
@@ -228,10 +232,18 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
                     break
                 except Exception as e:  # ретрай с паузой, потом дальше
                     last_err = e
-                    if "PerDay" in str(e) and model_i + 1 < len(model_chain):
-                        model_i += 1  # дневная квота модели сгорела — следующая
-                        print(f"  .. квота исчерпана, переключаюсь на {model_chain[model_i]}")
-                        continue
+                    if "PerDay" in str(e) or "NOT_FOUND" in str(e):
+                        if model_i + 1 < len(model_chain):
+                            model_i += 1
+                            print(f"  .. квота/модель исчерпана -> {model_chain[model_i]}")
+                            continue
+                        if key_i + 1 < len(keys):  # модели кончились — новый проект
+                            key_i += 1
+                            model_i = 0
+                            client = genai.Client(api_key=keys[key_i])
+                            print(f"  .. переключаюсь на ключ #{key_i + 1}, "
+                                  f"модель {model_chain[0]}")
+                            continue
                     time.sleep(10 * (attempt + 1))
             else:
                 print(f"  !! {scen} {clause}: LLM не ответил: {last_err}")
