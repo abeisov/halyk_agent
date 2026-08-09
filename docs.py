@@ -15,11 +15,12 @@ import pandas as pd
 import paths
 from ledger import load_ledger, account_map
 
-ACC_RE = re.compile(r"ACC-\d+")
+ACC_RE = re.compile(r"[A-Z]{2,6}-\d{3,6}")  # ACC-7801, TELE-4471
 
 # тип документа по характерным фразам первой страницы (эвристика, не критично)
 DOC_TYPE_MARKERS = [
-    ("loan_agreement", ["договор банковского займа", "кредитный договор", "loan agreement"]),
+    ("loan_agreement", ["договор банковского займа", "кредитный договор",
+                        "loan agreement", "credit agreement", "facility agreement"]),
     ("audit_report", ["аудитор", "независимого аудитора", "audit"]),
     ("kyc", ["kyc", "досье", "know your customer"]),
     ("other", []),

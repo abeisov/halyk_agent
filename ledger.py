@@ -35,12 +35,30 @@ def load_ledger(path: Path | None = None) -> pd.DataFrame:
     if df["scenario_id"].isna().any():
         bad = df.loc[df["scenario_id"].isna(), "txn_id"].tolist()
         raise ValueError(f"txn_id вне формата TXN-<scenario>-<NNNN>: {bad[:5]}")
+    df["scenario_id"] = _align_to_template(df["scenario_id"])
 
     rates = fx_rates(set(df["currency"]))
+    by_scen = _scenario_rates(set(df["currency"]))
     df["amount_usd"] = df.apply(
-        lambda r: r["amount"] * rates[r["currency"]], axis=1
+        lambda r: r["amount"] * by_scen.get(r["scenario_id"], {}).get(
+            r["currency"], rates[r["currency"]]), axis=1
     )
     return df
+
+
+def _scenario_rates(currencies: set[str]) -> dict[str, dict[str, Decimal]]:
+    """Курс, раскрытый в документах самого заёмщика, важнее общего."""
+    import fx
+
+    try:
+        by_scen = fx.extract_rates_by_scenario(currencies)
+    except Exception as e:
+        print(f"  !! курсы по сценариям недоступны: {e}")
+        return {}
+    if by_scen:
+        pairs = {f"{s}:{c}={v:.4f}" for s, cur in by_scen.items() for c, v in cur.items()}
+        print(f"  курсы заёмщиков: {', '.join(sorted(pairs))}")
+    return by_scen
 
 
 def fx_rates(currencies: set[str]) -> dict[str, Decimal]:
@@ -62,6 +80,34 @@ def fx_rates(currencies: set[str]) -> dict[str, Decimal]:
                 f"Нет курса к USD для валюты {code}: не найден в документах и "
                 f"нет запасного. Считать в валюте операции нельзя — промах в разы.")
     return rates
+
+
+def _align_to_template(series: pd.Series) -> pd.Series:
+    """Приводит извлечённый префикс к сценарию из шаблона.
+
+    Часть заёмщиков нумерует операции составно: TXN-KC-CAP-29 — сценарий «KC»,
+    а «CAP» уже категория. Берём самое длинное совпадение с шаблоном.
+    """
+    import json
+
+    try:
+        scenarios = set(json.load(open(paths.template()))["answers"])
+    except Exception:
+        return series
+    cache: dict[str, str] = {}
+
+    def fix(prefix: str) -> str:
+        if prefix in cache:
+            return cache[prefix]
+        best = prefix
+        if prefix not in scenarios:
+            matches = [s for s in scenarios if prefix.startswith(s + "-") or prefix == s]
+            if matches:
+                best = max(matches, key=len)
+        cache[prefix] = best
+        return best
+
+    return series.map(fix)
 
 
 def account_map(df: pd.DataFrame) -> dict[str, str]:

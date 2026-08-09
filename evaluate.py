@@ -56,8 +56,33 @@ def _verdict(actual: Decimal, spec: dict) -> str:
     return "COMPLIANT"
 
 
+def _periodic_values(df: pd.DataFrame, spec: dict) -> list[Decimal]:
+    """Значения метрики по периодам (кварталам) — для поквартальных проверок."""
+    sel = df[df["txn_id"].isin(spec["relevant_txn_ids"])].copy()
+    if sel.empty:
+        return []
+    quarter = pd.to_datetime(sel["date"], errors="coerce").dt.to_period("Q")
+    return [sum(g["amount_usd"], Decimal(0)) for _, g in sel.groupby(quarter)]
+
+
 def _compute_actual(df: pd.DataFrame, spec: dict) -> Decimal:
     df = _apply_amendments(df, spec)
+    agg = spec.get("aggregation")
+    if agg in ("min_quarterly", "max_quarterly"):
+        # ковенант проверяется за каждый квартал отдельно: годовой итог не
+        # устраняет нарушение в отдельном квартале
+        vals = _periodic_values(df, spec)
+        if vals:
+            if spec["is_ratio"]:  # доля квартала в годовом объёме
+                den = _sum_usd(df, spec["denominator_txn_ids"],
+                               spec.get("denominator_off_ledger_usd")) or \
+                      abs(sum(vals, Decimal(0)))
+                if den:
+                    shares = [abs(v) / den for v in vals]
+                    picked = min(shares) if agg == "min_quarterly" else max(shares)
+                    return picked.quantize(TWO, ROUND_HALF_UP)
+            picked = min(vals) if agg == "min_quarterly" else max(vals, key=abs)
+            return picked.quantize(TWO, ROUND_HALF_UP)  # знак важен для min
     if spec.get("aggregation") == "max":
         # ковенант проверяется по наибольшей из статей, а не по их сумме
         vals = [abs(v) for v in df[df["txn_id"].isin(spec["relevant_txn_ids"])]["amount_usd"]]
@@ -91,11 +116,11 @@ def _evidence(df: pd.DataFrame, spec: dict, base_status: str) -> str | None:
 
 
 def evaluate_cell(df: pd.DataFrame, spec: dict) -> dict:
-    actual = _compute_actual(df, spec)
-    status = _verdict(actual, spec)
+    signed = _compute_actual(df, spec)      # знак значим для проверок «не ниже»
+    status = _verdict(signed, spec)
     return {
         "status": status,
-        "actual": float(actual),
+        "actual": float(abs(signed)),       # в сабмит идёт модуль
         "evidence_txn_id": _evidence(df, spec, status),
     }
 

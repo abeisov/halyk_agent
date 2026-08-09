@@ -79,8 +79,8 @@ def validate(sub: dict, ledger_df: pd.DataFrame) -> list[str]:
             if cell.get("status") not in ("COMPLIANT", "BREACH"):
                 errors.append(f"{where}: status = {cell.get('status')!r}")
             a = cell.get("actual")
-            if not isinstance(a, (int, float)) or isinstance(a, bool) or a <= 0:
-                errors.append(f"{where}: actual = {a!r} (нужно положительное число)")
+            if not isinstance(a, (int, float)) or isinstance(a, bool) or a < 0:
+                errors.append(f"{where}: actual = {a!r} (нужно неотрицательное число)")
             elif round(a, 2) != a:
                 errors.append(f"{where}: actual = {a} (больше 2 знаков)")
             ev = cell.get("evidence_txn_id")

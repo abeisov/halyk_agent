@@ -27,6 +27,49 @@ def _num(s: str) -> Decimal:
     return Decimal(s.replace(",", "").replace(" ", ""))
 
 
+def extract_rates_by_scenario(currencies: set[str] | None = None
+                              ) -> dict[str, dict[str, Decimal]]:
+    """scenario_id -> {currency -> курс}.
+
+    Курс задан «по курсу фактического расчёта по операциям периода», поэтому у
+    каждого заёмщика он свой: применять общую медиану ко всем нельзя.
+    Документ привязывается к сценарию через doc_index.
+    """
+    import pandas as pd
+
+    try:
+        idx = pd.read_csv(paths.processed("doc_index.csv"))
+    except Exception:
+        return {}
+    doc_scen = dict(zip(idx["doc_id"], idx["scenario_id"]))
+
+    out: dict[str, dict[str, list[Decimal]]] = {}
+    for pdf in sorted(paths.documents().glob("*.pdf")):
+        scen = doc_scen.get(pdf.name)
+        if not isinstance(scen, str):
+            continue
+        try:
+            with pymupdf.open(pdf) as doc:
+                text = "\n".join(p.get_text() for p in doc)
+        except Exception:
+            continue
+        for i, pat in enumerate(PATTERNS):
+            for m in pat.finditer(text):
+                usd, amount, code = ((m.group(3), m.group(1), m.group(2)) if i == 0
+                                     else (m.group(1), m.group(2), m.group(3)))
+                if code == "USD" or (currencies is not None and code not in currencies):
+                    continue
+                try:
+                    rate = _num(usd) / _num(amount)
+                except (ArithmeticError, ValueError):
+                    continue
+                if Decimal("0.2") <= rate <= Decimal("5"):
+                    out.setdefault(scen, {}).setdefault(code, []).append(rate)
+
+    return {s: {c: sorted(v)[len(v) // 2] for c, v in cur.items()}
+            for s, cur in out.items()}
+
+
 def extract_rates(currencies: set[str] | None = None,
                   min_ratio: Decimal = Decimal("0.2"),
                   max_ratio: Decimal = Decimal("5")) -> dict[str, Decimal]:

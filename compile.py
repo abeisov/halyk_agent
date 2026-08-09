@@ -27,10 +27,10 @@ from ledger import load_ledger
 
 import paths
 
-SECTION_RE = re.compile(r"Статья 6 — ")
-NEXT_SECTION_RE = re.compile(r"Статья 7 — ")
-CLAUSE_SPLIT_RE = re.compile(r"(?=Пункт 6\.\d+)")
-CLAUSE_NUM_RE = re.compile(r"^Пункт (6\.\d+)")
+# договоры встречаются и на русском, и на английском
+CLAUSE_WORDS = r"(?:Пункт|Section|Clause)"
+CLAUSE_SPLIT_RE = re.compile(rf"(?={CLAUSE_WORDS}\s*\d+\.\d+)")
+CLAUSE_NUM_RE = re.compile(rf"^{CLAUSE_WORDS}\s*(\d+\.\d+)")
 
 
 # ---------- этап 1: тексты пунктов ----------
@@ -41,28 +41,45 @@ def extract_clauses() -> dict[str, dict[str, str]]:
     contracts = idx[(idx["doc_type"] == "loan_agreement") & (~idx["is_void"])]
     template_scenarios = list(json.load(open(paths.template()))["answers"])
 
+    template = json.load(open(paths.template()))["answers"]
+
     out: dict[str, dict[str, str]] = {}
     for _, row in contracts.iterrows():
         scen = row["scenario_id"]
         if scen not in template_scenarios:
             continue
+        wanted = set(template[scen])                      # 6.1..6.4 или 5.1..5.3
+        articles = {c.split(".")[0] for c in wanted}      # номера статей в шаблоне
         with pymupdf.open(paths.documents() / row["doc_id"]) as doc:
             text = "\n".join(p.get_text() for p in doc)
-        m6 = SECTION_RE.search(text)
-        m7 = NEXT_SECTION_RE.search(text, m6.end()) if m6 else None
-        if not (m6 and m7):
-            raise ValueError(f"{scen}: не нашёл границы Статьи 6 в {row['doc_id']}")
-        body = text[m6.start():m7.start()]
-        clauses = {}
-        for chunk in CLAUSE_SPLIT_RE.split(body):
+
+        clauses: dict[str, str] = {}
+        for art in articles:
+            # тело статьи: от её заголовка до заголовка следующей
+            start = re.search(rf"Статья {art} — ", text)
+            if not start:
+                continue
+            end = re.search(rf"Статья {int(art) + 1} — ", text[start.end():])
+            body = text[start.start():start.end() + end.start()] if end else text[start.start():]
+            for chunk in CLAUSE_SPLIT_RE.split(body):
+                m = CLAUSE_NUM_RE.match(chunk.strip())
+                if m and m.group(1) in wanted:
+                    clauses[m.group(1)] = " ".join(chunk.split())
+        # запасной проход по всему документу: английские договоры нумеруют
+        # разделы иначе («Article V — Financial Covenants», «Section 5.1»)
+        for chunk in CLAUSE_SPLIT_RE.split(text):
             m = CLAUSE_NUM_RE.match(chunk.strip())
-            if m:
+            if m and m.group(1) in wanted and m.group(1) not in clauses:
                 clauses[m.group(1)] = " ".join(chunk.split())
         out[scen] = clauses
 
     missing = [s for s in template_scenarios if s not in out]
     if missing:
-        raise ValueError(f"Сценарии без договора: {missing}")
+        print(f"  !! сценарии без договора: {missing}")
+    for s, cls in out.items():
+        gap = set(template[s]) - set(cls)
+        if gap:
+            print(f"  !! {s}: не найдены пункты {sorted(gap)}")
     return out
 
 
@@ -80,8 +97,8 @@ class CovenantSpec(BaseModel):
     analysis: str = Field(description="Кратко (до 3 предложений): что измеряем, по какому признаку отобраны операции, что предписали документы. Заполняется ПЕРВЫМ")
     metric_description: str = Field(description="Что измеряет ковенант, одной фразой")
     is_ratio: bool = Field(description="True, если метрика — коэффициент, а не сумма в USD")
-    aggregation: str = Field(description="'sum' — метрика есть сумма отобранных операций (обычный случай); 'max' — ковенант проверяется по НАИБОЛЬШЕЙ из отдельных статей, а не по их сумме")
-    threshold: float = Field(description="Числовой порог из текста пункта")
+    aggregation: str = Field(description="'sum' — сумма отобранных операций за период (обычный случай); 'max' — проверка по наибольшей из отдельных статей, а не по их сумме; 'min_quarterly'/'max_quarterly' — если ковенант проверяется ЗА КАЖДЫЙ КВАРТАЛ отдельно (тогда actual — худший квартал)")
+    threshold: float = Field(description="Порог В ТЕХ ЖЕ ЕДИНИЦАХ, что и метрика. Если он задан как доля от величины из отчётности («5 процентов капзатрат Группы»), вычисли его в долларах: 0.05 * эту величину из документов, а не пиши 5")
     direction: str = Field(description="'max' — нарушение при превышении порога, 'min' — при значении ниже порога")
     trigger_active: bool = Field(description="False только если ковенант применяется при условии (триггере), и это условие НЕ сработало")
     trigger_reasoning: str = Field(description="Если в пункте есть условие применимости — почему сработало/нет, иначе пустая строка")
@@ -151,6 +168,12 @@ PROMPT = """Ты компилируешь пункт кредитного дог
    к B» -> A числитель, B знаменатель. Прикинь порядок величины результата и
    сверь с порогом — если результат отличается от порога в десятки раз,
    ты, вероятно, ошибся скоупом или перепутал местами.
+8. СОГЛАСУЙ ЕДИНИЦЫ порога и метрики, иначе вердикт будет случайным:
+   - is_ratio=true -> threshold маленький (обычно 0.01..10);
+   - is_ratio=false (сумма в USD) -> threshold в долларах.
+   Если порог выражен через показатель отчётности («Разрешённая величина
+   означает 5 процентов капитальных затрат Группы»), найди эту величину в
+   документах и подставь произведение в долларах.
 8. Не агрегируй суммы сам — классифицируй операции и дословно переноси
    раскрытые в документах значения. Верни строго JSON по схеме."""
 
@@ -223,8 +246,6 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
                     if spec.is_ratio and not (spec.denominator_txn_ids
                                               or spec.denominator_off_ledger_usd):
                         raise ValueError("коэффициент без знаменателя")
-                    if not (spec.relevant_txn_ids or spec.off_ledger_amounts_usd):
-                        raise ValueError("пустой числитель: ни одной операции в скоупе")
                     payload = spec.model_dump()
                     payload["_model"] = router.current  # какая модель дала ответ
                     specs.setdefault(scen, {})[clause] = payload

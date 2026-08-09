@@ -15,7 +15,9 @@ import os
 import time
 
 QUOTA_MARKERS = ("PerDay", "RESOURCE_EXHAUSTED", "rate_limit", "429",
-                 "NOT_FOUND", "404", "402", "413", "insufficient")
+                 "NOT_FOUND", "404", "402", "413", "insufficient",
+                 "credit balance", "no credits", "quota", "billing",
+                 "exceeded", "too low")
 
 
 def _gemini_keys() -> list[str]:
