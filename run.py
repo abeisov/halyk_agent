@@ -60,7 +60,7 @@ def main() -> None:
 
     print("[5/5] Сборка и валидация...")
     from submit import build_submission, validate
-    sub = build_submission(cells, submission)
+    sub = build_submission(cells, submission, specs)
     errors = validate(sub, df)
     if errors:
         print("ВАЛИДАЦИЯ ПРОВАЛЕНА:")

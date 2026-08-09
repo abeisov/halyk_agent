@@ -16,11 +16,30 @@ import paths
 DEFAULT_CELL = {"status": "COMPLIANT", "actual": 1.00, "evidence_txn_id": None}
 
 
-def build_submission(cells: dict, out_path: Path) -> dict:
+def models_used(specs: dict) -> str:
+    """Модели, фактически давшие ответы, — по убыванию числа ячеек.
+
+    Цепочка фолбэка может задействовать несколько провайдеров, поэтому поле
+    заполняется по факту, а не тем, что записано в настройках.
+    """
+    counts: dict[str, int] = {}
+    for clauses in specs.values():
+        for spec in clauses.values():
+            tag = (spec or {}).get("_model")
+            if not tag:
+                continue
+            name = tag.split("/", 1)[1] if "/" in tag else tag  # без метки ключа
+            counts[name] = counts.get(name, 0) + 1
+    if not counts:
+        return os.environ.get("MODEL_MAIN", "gemini-3.6-flash")
+    return ", ".join(sorted(counts, key=lambda m: -counts[m]))
+
+
+def build_submission(cells: dict, out_path: Path, specs: dict | None = None) -> dict:
     sub = json.load(open(paths.template()))
     sub["team"] = os.environ.get("TEAM", "halyk-covenant-agent")
     sub["contact_email"] = os.environ.get("CONTACT_EMAIL", "anuar.beisov1992@gmail.com")
-    sub["model"] = os.environ.get("MODEL_MAIN", "gemini-2.5-flash")
+    sub["model"] = models_used(specs or {})
 
     fallbacks = []
     for scen, clauses in sub["answers"].items():

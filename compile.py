@@ -225,7 +225,9 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
                         raise ValueError("коэффициент без знаменателя")
                     if not (spec.relevant_txn_ids or spec.off_ledger_amounts_usd):
                         raise ValueError("пустой числитель: ни одной операции в скоупе")
-                    specs.setdefault(scen, {})[clause] = spec.model_dump()
+                    payload = spec.model_dump()
+                    payload["_model"] = router.current  # какая модель дала ответ
+                    specs.setdefault(scen, {})[clause] = payload
                     break
                 except Exception as e:
                     last_err = e
