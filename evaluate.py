@@ -44,6 +44,24 @@ def _sum_usd(df: pd.DataFrame, txn_ids: list[str], extra: list | None = None) ->
     return abs(total)
 
 
+def _is_difference(df: pd.DataFrame, txn_ids: list[str]) -> bool:
+    """Метрика — разность (выручка минус расходы), а не сумма однородных статей.
+
+    Признак: в скоупе есть и поступления, и списания. У таких показателей
+    (EBITDA, запас покрытия) знак значим: отрицательное значение нарушает
+    ковенант «не ниже», и брать модуль до сравнения нельзя.
+    """
+    vals = df[df["txn_id"].isin(txn_ids)]["amount_usd"]
+    return any(v > 0 for v in vals) and any(v < 0 for v in vals)
+
+
+def _signed_metric(df: pd.DataFrame, txn_ids: list[str], extra: list | None = None) -> Decimal:
+    total = _signed_sum(df, txn_ids)
+    for x in (extra or []):
+        total += Decimal(str(x))
+    return total if _is_difference(df, txn_ids) else abs(total)
+
+
 def _breached(actual: Decimal, threshold: Decimal, direction: str) -> bool:
     return actual > threshold if direction == "max" else actual < threshold
 
@@ -88,7 +106,7 @@ def _compute_actual(df: pd.DataFrame, spec: dict) -> Decimal:
         vals = [abs(v) for v in df[df["txn_id"].isin(spec["relevant_txn_ids"])]["amount_usd"]]
         vals += [abs(Decimal(str(x))) for x in (spec.get("off_ledger_amounts_usd") or [])]
         return max(vals).quantize(TWO, ROUND_HALF_UP) if vals else Decimal(0)
-    num = _sum_usd(df, spec["relevant_txn_ids"], spec.get("off_ledger_amounts_usd"))
+    num = _signed_metric(df, spec["relevant_txn_ids"], spec.get("off_ledger_amounts_usd"))
     if spec["is_ratio"]:
         den = _sum_usd(df, spec["denominator_txn_ids"],
                        spec.get("denominator_off_ledger_usd"))
