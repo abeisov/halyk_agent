@@ -98,22 +98,22 @@ def _compute_actual(df: pd.DataFrame, spec: dict) -> Decimal:
                 if den:
                     shares = [abs(v) / den for v in vals]
                     picked = min(shares) if agg == "min_quarterly" else max(shares)
-                    return picked.quantize(TWO, ROUND_HALF_UP)
+                    return picked
             picked = min(vals) if agg == "min_quarterly" else max(vals, key=abs)
-            return picked.quantize(TWO, ROUND_HALF_UP)  # знак важен для min
+            return picked  # знак важен для min
     if spec.get("aggregation") == "max":
         # ковенант проверяется по наибольшей из статей, а не по их сумме
         vals = [abs(v) for v in df[df["txn_id"].isin(spec["relevant_txn_ids"])]["amount_usd"]]
         vals += [abs(Decimal(str(x))) for x in (spec.get("off_ledger_amounts_usd") or [])]
-        return max(vals).quantize(TWO, ROUND_HALF_UP) if vals else Decimal(0)
+        return max(vals) if vals else Decimal(0)
     num = _signed_metric(df, spec["relevant_txn_ids"], spec.get("off_ledger_amounts_usd"))
     if spec["is_ratio"]:
         den = _sum_usd(df, spec["denominator_txn_ids"],
                        spec.get("denominator_off_ledger_usd"))
         if den == 0:
             raise ZeroDivisionError("пустой знаменатель коэффициента")
-        return (num / den).quantize(TWO, ROUND_HALF_UP)
-    return num.quantize(TWO, ROUND_HALF_UP)
+        return num / den
+    return num
 
 
 def _evidence(df: pd.DataFrame, spec: dict, base_status: str) -> str | None:
@@ -135,10 +135,12 @@ def _evidence(df: pd.DataFrame, spec: dict, base_status: str) -> str | None:
 
 def evaluate_cell(df: pd.DataFrame, spec: dict) -> dict:
     signed = _compute_actual(df, spec)      # знак значим для проверок «не ниже»
-    status = _verdict(signed, spec)
+    status = _verdict(signed, spec)         # сравнение по ПОЛНОЙ точности:
+    # округление до сравнения делает граничные случаи (0.0434 против порога
+    # 0.04) ложно соблюдёнными и обнуляет ячейку целиком
     return {
         "status": status,
-        "actual": float(abs(signed)),       # в сабмит идёт модуль
+        "actual": float(abs(signed).quantize(TWO, ROUND_HALF_UP)),
         "evidence_txn_id": _evidence(df, spec, status),
     }
 
