@@ -123,8 +123,17 @@ PROMPT = """Ты компилируешь пункт кредитного дог
 ПУНКТ ДОГОВОРА ({scenario} {clause}):
 {clause_text}
 
-ЛЕДЖЕР (расходы отрицательные; amount_missing=True — сумма не выгружена, ищи в документах):
+ЛЕДЖЕР (расходы отрицательные; amount_missing=True — сумма не выгружена, ищи в документах).
+Колонка category — категория операции, определённая ЗАРАНЕЕ единым разбором всего
+реестра этого заёмщика; related=True — контрагент признан связанной стороной по
+правилу из KYC. ОПИРАЙСЯ НА ЭТИ КОЛОНКИ, а не на собственное прочтение описаний:
+  revenue — выручка (other_income выручкой НЕ является);
+  EBITDA = revenue минус (payroll + rent + utilities + opex_other);
+  операционные расходы = payroll + rent + utilities + opex_other;
+  tax, interest, capex, financing в операционные расходы и EBITDA НЕ входят.
 {ledger_csv}
+
+ПРАВИЛО СВЯЗАННЫХ СТОРОН У ЭТОГО ЗАЁМЩИКА: {related_rule}
 
 СПРАВОЧНЫЕ ДОКУМЕНТЫ ЗАЁМЩИКА (KYC — определяет связанные стороны; аудит и служебные
 записки — раскрытия сумм, переклассификации, валютные курсы, внекнижные обязательства):
@@ -199,6 +208,23 @@ def trim_document(text: str, doc_type: str) -> str:
     return "\n".join(kept) if kept else text[:3000]
 
 
+def _load_classes() -> dict:
+    """Готовая классификация реестра, если она была построена (classify.py)."""
+    path = paths.processed("classes.json")
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _with_categories(sdf, classification: dict | None):
+    """Добавляет к реестру колонки category и related из классификации."""
+    if not classification:
+        return sdf
+    txns = classification.get("transactions", {})
+    sdf = sdf.copy()
+    sdf["category"] = sdf["txn_id"].map(lambda t: (txns.get(t) or {}).get("category", "?"))
+    sdf["related"] = sdf["txn_id"].map(lambda t: (txns.get(t) or {}).get("is_related_party", False))
+    return sdf
+
+
 def support_texts() -> dict[str, str]:
     """scenario_id -> текст действующих KYC и аудиторских отчётов (для промпта)."""
     idx = pd.read_csv(paths.processed("doc_index.csv"))
@@ -228,16 +254,21 @@ def compile_specs(clauses: dict, df: pd.DataFrame) -> dict:
         specs = json.load(open(paths.processed("specs.json")))
 
     support = support_texts()
+    classes = _load_classes()
     cols = ["txn_id", "date", "counterparty", "description", "amount", "currency",
             "amount_usd", "amount_missing"]
     for scen, cls in clauses.items():
-        ledger_csv = df[df["scenario_id"] == scen][cols].to_csv(index=False)
+        sdf = _with_categories(df[df["scenario_id"] == scen], classes.get(scen))
+        extra = [c for c in ("category", "related") if c in sdf.columns]
+        ledger_csv = sdf[cols + extra].to_csv(index=False)
+        rule = (classes.get(scen) or {}).get("related_party_rule", "(досье не разобрано)")
         for clause, clause_text in sorted(cls.items()):
             if specs.get(scen, {}).get(clause):
                 continue
             prompt = PROMPT.format(scenario=scen, clause=clause,
                                    clause_text=clause_text, ledger_csv=ledger_csv,
-                                   support_text=support.get(scen, "(нет)"))
+                                   support_text=support.get(scen, "(нет)"),
+                                   related_rule=rule)
             last_err = None
             for attempt in range(3):
                 try:
