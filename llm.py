@@ -36,14 +36,59 @@ class Provider:
 
 
 class Gemini(Provider):
+    """Прямой REST — SDK google-genai ломается при конфликте зависимостей
+    («client has been closed») при полностью рабочих ключах."""
+
+    ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/models/"
+                "{model}:generateContent?key={key}")
+
     def call(self, model, prompt, schema):
-        from google import genai
-        client = genai.Client(api_key=self.key)
-        resp = client.models.generate_content(
-            model=model, contents=prompt,
-            config={"temperature": 0, "response_mime_type": "application/json",
-                    "response_schema": schema})
-        return resp.text
+        import urllib.error
+        import urllib.request
+
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0,
+                "responseMimeType": "application/json",
+                "responseSchema": _gemini_schema(schema),
+            },
+        }
+        req = urllib.request.Request(
+            self.ENDPOINT.format(model=model, key=self.key),
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                data = json.load(resp)
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"{e.code}: {e.read().decode()[:300]}") from None
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def _gemini_schema(schema: dict, defs: dict | None = None):
+    """JSON Schema от pydantic -> формат, который принимает Gemini REST:
+    $ref/$defs разворачиваются, служебные ключи отбрасываются."""
+    defs = defs if defs is not None else schema.get("$defs", {})
+    if isinstance(schema, list):
+        return [_gemini_schema(v, defs) for v in schema]
+    if not isinstance(schema, dict):
+        return schema
+    if "$ref" in schema:
+        name = schema["$ref"].rsplit("/", 1)[-1]
+        return _gemini_schema(defs.get(name, {}), defs)
+    allowed = {"type", "properties", "items", "required", "enum", "description"}
+    out = {}
+    for key, value in schema.items():
+        if key not in allowed:
+            continue
+        if key == "properties":  # это имена полей, а не вложенная схема
+            out[key] = {name: _gemini_schema(sub, defs) for name, sub in value.items()}
+        else:
+            out[key] = _gemini_schema(value, defs)
+    if out.get("type") == "object" and out.get("properties"):
+        out["required"] = list(out["properties"])
+    return out
 
 
 def _strict(node):
